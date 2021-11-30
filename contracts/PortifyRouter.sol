@@ -29,17 +29,21 @@ contract PortifyRouter is IPortifyRouter, Ownable {
 
     event NewDex(DexInfo new_dex);
     event DexRemoval(DexInfo removed_dex);
+    event NewBridgeToken(address token);
+    event BridgeTokenRemoval(address removed_token);
 
     DexInfo[] public dex_list;
     address public immutable override WETH;
+    address[] public bridge_tokens; // some popular tokens like usdt/busd
 
     modifier ensure(uint deadline) {
         require(deadline >= block.timestamp, 'PortifyRouter: EXPIRED');
         _;
     }
 
-    constructor(DexInfo[] memory _dex_list, address _WETH) {
+    constructor(DexInfo[] memory _dex_list, address _WETH, address[] memory _bridge_tokens) {
         WETH = _WETH;
+        bridge_tokens = _bridge_tokens;
 
         for (uint i = 0; i < dex_list.length; i++) {
             dex_list.push(_dex_list[i]);
@@ -50,6 +54,18 @@ contract PortifyRouter is IPortifyRouter, Ownable {
 
     receive() external payable {
         assert(msg.sender == WETH); // only accept ETH via fallback from the WETH contract
+    }
+
+    function addBridgeToken(address token) external onlyOwner {
+        bridge_tokens.push(token);
+        emit NewBridgeToken(token);
+    }
+
+    function removeBridgeToken(uint token_idx) external onlyOwner {
+        emit BridgeTokenRemoval(bridge_tokens[token_idx]);
+
+        bridge_tokens[token_idx] = bridge_tokens[bridge_tokens.length - 1];
+        bridge_tokens.pop();
     }
 
     function addNewDex(DexInfo memory new_dex) external onlyOwner {
@@ -273,11 +289,48 @@ contract PortifyRouter is IPortifyRouter, Ownable {
         TransferHelper.safeTransferETH(to, amountOut);
     }
 
-//    function getBestDealForDex(uint dex_id, uint amount_in, address tokenA, address tokenB) public view returns (Deal memory) {
-//        // first, check obvious path
-//        Deal memory simple_deal;
-//        simple_deal.amounts = dex_list[dex_id].router.getAmountsOut(amount_in, [tokenA, tokenB]);
-//    }
+    function _getSimplePath(address tokenA, address tokenB) internal pure returns (address[] memory) {
+        address[] memory path = new address[](2);
+        path[0] = tokenA;
+        path[1] = tokenB;
+        return path;
+    }
+
+    function _getBridgePath(address tokenA, address tokenB, address bridgeToken) internal pure returns (address[] memory) {
+        address[] memory path = new address[](3);
+        path[0] = tokenA;
+        path[1] = bridgeToken;
+        path[2] = tokenB;
+        return path;
+    }
+
+    function getBestDealForDex(uint dex_id, uint amount_in, address tokenA, address tokenB) public view returns (Deal memory) {
+        // first, check obvious path
+        Deal memory best_deal;
+        best_deal.path = _getSimplePath(tokenA, tokenB);
+        best_deal.amounts = dex_list[dex_id].router.getAmountsOut(amount_in, best_deal.path);
+        best_deal.dex_id = dex_id;
+
+        for (uint i = 0; i < bridge_tokens.length; i++) {
+            Deal memory complex_deal;
+            complex_deal.path = _getBridgePath(tokenA, tokenB, bridge_tokens[i]);
+            complex_deal.amounts = dex_list[dex_id].router.getAmountsOut(amount_in, complex_deal.path);
+            complex_deal.dex_id = dex_id;
+            if (complex_deal.amounts[complex_deal.amounts.length - 1] > best_deal.amounts[best_deal.amounts.length - 1]) {
+                best_deal = complex_deal;
+            }
+        }
+
+        return best_deal;
+    }
+
+    function getBestDeals(uint amount_in, address tokenA, address tokenB) public view returns (Deal[] memory) {
+        Deal[] memory deals = new Deal[](dex_list.length);
+        for (uint i = 0; i < deals.length; i++) {
+            deals[i] = getBestDealForDex(i);
+        }
+        return deals;
+    }
 
     function getAmountOut(uint dex_id, uint amountIn, uint reserveIn, uint reserveOut)
     public
