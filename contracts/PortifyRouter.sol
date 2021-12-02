@@ -17,7 +17,6 @@ contract PortifyRouter is IPortifyRouter, Ownable {
     struct DexInfo {
         IPancakeV2Router02 router;
         IPancakeV2Factory factory; // could be omitted on initialization
-        bytes32 pair_code_hash; // could be omitted on initialization
         string name;
     }
 
@@ -33,22 +32,22 @@ contract PortifyRouter is IPortifyRouter, Ownable {
     event BridgeTokenRemoval(address removed_token);
 
     DexInfo[] public dex_list;
-    address public immutable override WETH;
     address[] public bridge_tokens; // some popular tokens like usdt/busd
+    address public override WETH;
 
     modifier ensure(uint deadline) {
         require(deadline >= block.timestamp, 'PortifyRouter: EXPIRED');
         _;
     }
 
-    constructor(DexInfo[] memory _dex_list, address _WETH, address[] memory _bridge_tokens) {
+    constructor(address[] memory routers, string[] memory names, address _WETH, address[] memory _bridge_tokens) {
+        require (routers.length == names.length, "Bad names input");
+
         WETH = _WETH;
         bridge_tokens = _bridge_tokens;
 
-        for (uint i = 0; i < dex_list.length; i++) {
-            dex_list.push(_dex_list[i]);
-            dex_list[i].factory = IPancakeV2Factory(dex_list[i].router.factory());
-            dex_list[i].pair_code_hash = dex_list[i].factory.INIT_CODE_PAIR_HASH();
+        for (uint i = 0; i < routers.length; i++) {
+            addNewDex(routers[i], names[i]);
         }
     }
 
@@ -68,12 +67,14 @@ contract PortifyRouter is IPortifyRouter, Ownable {
         bridge_tokens.pop();
     }
 
-    function addNewDex(DexInfo memory new_dex) external onlyOwner {
-        new_dex.factory = IPancakeV2Factory(new_dex.router.factory());
-        new_dex.pair_code_hash = new_dex.factory.INIT_CODE_PAIR_HASH();
+    function addNewDex(address router, string memory name) public onlyOwner {
+        DexInfo memory _dex;
+        _dex.router = IPancakeV2Router02(router);
+        _dex.factory = IPancakeV2Factory(_dex.router.factory());
+        _dex.name = name;
 
-        dex_list.push(new_dex);
-        emit NewDex(new_dex);
+        dex_list.push(_dex);
+        emit NewDex(_dex);
     }
 
     function removeDex(uint256 dex_idx) external onlyOwner {
@@ -304,30 +305,41 @@ contract PortifyRouter is IPortifyRouter, Ownable {
         return path;
     }
 
+    function _tryGetAmountsOut(uint dex_id, uint amount_in, address[] memory path) internal view returns (uint[] memory) {
+        try dex_list[dex_id].router.getAmountsOut(amount_in, path) returns (uint[] memory amounts) {
+            return amounts;
+        } catch {}
+        // return empty array
+        uint[] memory empty_amounts = new uint[](path.length);
+        return empty_amounts;
+    }
+
     function getBestDealForDex(uint dex_id, uint amount_in, address tokenA, address tokenB) public view returns (Deal memory) {
         // first, check obvious path
         Deal memory best_deal;
         best_deal.path = _getSimplePath(tokenA, tokenB);
-        best_deal.amounts = dex_list[dex_id].router.getAmountsOut(amount_in, best_deal.path);
+        best_deal.amounts = _tryGetAmountsOut(dex_id, amount_in, best_deal.path);
         best_deal.dex_id = dex_id;
 
         for (uint i = 0; i < bridge_tokens.length; i++) {
             Deal memory complex_deal;
+            if (tokenA == bridge_tokens[i] || tokenB == bridge_tokens[i]) {
+                continue;
+            }
             complex_deal.path = _getBridgePath(tokenA, tokenB, bridge_tokens[i]);
-            complex_deal.amounts = dex_list[dex_id].router.getAmountsOut(amount_in, complex_deal.path);
+            complex_deal.amounts = _tryGetAmountsOut(dex_id, amount_in, complex_deal.path);
             complex_deal.dex_id = dex_id;
             if (complex_deal.amounts[complex_deal.amounts.length - 1] > best_deal.amounts[best_deal.amounts.length - 1]) {
                 best_deal = complex_deal;
             }
         }
-
         return best_deal;
     }
 
     function getBestDeals(uint amount_in, address tokenA, address tokenB) public view returns (Deal[] memory) {
         Deal[] memory deals = new Deal[](dex_list.length);
         for (uint i = 0; i < deals.length; i++) {
-            deals[i] = getBestDealForDex(i);
+            deals[i] = getBestDealForDex(i, amount_in, tokenA, tokenB);
         }
         return deals;
     }
@@ -382,12 +394,7 @@ contract PortifyRouter is IPortifyRouter, Ownable {
     // calculates the CREATE2 address for a pair without making any external calls
     function pairFor(uint dex_id, address tokenA, address tokenB) internal view returns (address pair) {
         (address token0, address token1) = sortTokens(tokenA, tokenB);
-        pair = address(uint160(uint256(keccak256(abi.encodePacked(
-            hex'ff',
-            dex_list[dex_id].factory,
-            keccak256(abi.encodePacked(token0, token1)),
-            dex_list[dex_id].pair_code_hash // init code hash
-        )))));
+        pair = dex_list[dex_id].factory.getPair(token0, token1);
     }
 
 }
