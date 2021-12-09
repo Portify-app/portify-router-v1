@@ -16,7 +16,7 @@ import './libraries/TransferHelper.sol';
 contract PortifyRouter is IPortifyRouter, Ownable {
     struct DexInfo {
         IPancakeV2Router02 router;
-        IPancakeV2Factory factory; // could be omitted on initialization
+        IPancakeV2Factory factory;
         string name;
     }
 
@@ -34,6 +34,7 @@ contract PortifyRouter is IPortifyRouter, Ownable {
     DexInfo[] public dex_list;
     address[] public bridge_tokens; // some popular tokens like usdt/busd
     address public override WETH;
+    mapping (string => uint256) public dex_name_to_id;
 
     modifier ensure(uint deadline) {
         require(deadline >= block.timestamp, 'PortifyRouter: EXPIRED');
@@ -73,12 +74,18 @@ contract PortifyRouter is IPortifyRouter, Ownable {
         _dex.factory = IPancakeV2Factory(_dex.router.factory());
         _dex.name = name;
 
+        dex_name_to_id[name] = dex_list.length;
+
         dex_list.push(_dex);
         emit NewDex(_dex);
     }
 
     function removeDex(uint256 dex_idx) external onlyOwner {
         emit DexRemoval(dex_list[dex_idx]);
+
+        // update name indexes
+        dex_name_to_id[dex_list[dex_idx].name] = 0;
+        dex_name_to_id[dex_list[dex_list.length - 1].name] = dex_idx;
 
         dex_list[dex_idx] = dex_list[dex_list.length - 1];
         dex_list.pop();
